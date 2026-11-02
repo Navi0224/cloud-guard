@@ -1,0 +1,70 @@
+# Runs the test-suite and uses cloud-guard as a "shift-left" gate on Terraform.
+# No AWS credentials are needed: the tests use moto and the Terraform scan is static.
+name: cloud-guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege for the workflow token too: this job only needs to read the repo.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+      - name: Run tests
+        run: python -m pytest -q
+
+  terraform-scan:
+    name: terraform scan
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      # Report-only scan of the deliberately insecure example: shows the
+      # findings in the job summary without failing the build.
+      - name: Scan insecure example (report only)
+        run: |
+          cloud-guard scan-terraform examples/terraform/insecure --format markdown --output insecure-report.md --fail-on none
+          cat insecure-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      # The real gate: in your own repo point this at your Terraform directory.
+      # Any HIGH or CRITICAL finding makes cloud-guard exit 1 and fails the job.
+      - name: Gate on secure example (fail on high)
+        run: cloud-guard scan-terraform examples/terraform/secure --fail-on high --format html --output secure-report.html
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-guard-reports
+          path: |
+            insecure-report.md
+            secure-report.html
